@@ -1,10 +1,10 @@
-from abc import ABC
 import threading
+from abc import ABC
 from typing import Optional, Union
 
+import gpytorch
 import numpy as np
 import torch
-import gpytorch
 
 from ..pytorch_feature_selector import PyTorchFeatureSelector
 from ..pytorch_utils import to_numpy, to_tensor
@@ -130,16 +130,14 @@ class OnlineLearningStrategy(DataProcessingStrategy):
     def __init__(
         self,
         max_num_points: int = 200,
-        data_selection: str = "random",
+        data_selection: str = "balanced",
         device: str = "cpu",
     ) -> None:
         self.max_num_points = max_num_points
-        if data_selection == "newest":
-            self.use_newest = True
-        elif data_selection == "random":
-            self.use_newest = False
-        else:
-            raise ValueError("Data selection must be either 'newest' or 'random'.")
+        if data_selection not in ("newest", "random", "balanced"):
+            raise ValueError("Data selection must be 'newest', 'random', or 'balanced'.")
+        self.data_selection = data_selection
+        self.use_newest = (data_selection == "newest")
         self.device = device
 
     def process(
@@ -180,27 +178,33 @@ class OnlineLearningStrategy(DataProcessingStrategy):
             )
             return
 
+        X = gp_model.train_inputs[0]
+        x_new = gp_feature_selector(x_input, timestamp=timestamp)
+
+        balanced_drop_idx = None
+        if self.data_selection == "balanced":
+            accept, balanced_drop_idx = self._balanced_gate_and_drop(X, x_new)
+            if not accept:
+                return None
+
         # Check if GP is already full
-        if gp_model.train_inputs[0].shape[-2] >= self.max_num_points:
+        if X.shape[-2] >= self.max_num_points:
             with torch.no_grad():
-                if self.use_newest:
+                if self.data_selection == "balanced" and balanced_drop_idx is not None:
+                    drop_idx = int(balanced_drop_idx)
+                elif self.use_newest:
                     drop_idx = 0
                 else:
-                    drop_idx = torch.randint(
-                        0, self.max_num_points, torch.Size(), requires_grad=False
-                    ).item()
+                    drop_idx = torch.randint(0, self.max_num_points, torch.Size(), requires_grad=False).item()
+
                 selector = torch.ones(self.max_num_points, requires_grad=False)
                 selector[drop_idx] = 0
 
-                # Calculate fantasy model with data selector
                 try:
                     fantasy_model = gp_model.get_fantasy_model(
-                        gp_feature_selector(x_input, timestamp=timestamp),
-                        y_target,
-                        data_selector=selector,
+                        x_new, y_target, data_selector=selector
                     )
                 except TypeError as err:
-                    # check if error message contains data_selector
                     if "data_selector" in str(err):
                         raise ImportError(
                             "OnlineLearningStrategy requires the [gpytorch-exo] optional dependencies (see pyproject.toml)."
@@ -212,10 +216,26 @@ class OnlineLearningStrategy(DataProcessingStrategy):
         with torch.no_grad():
             # Add observation and return updated model
             fantasy_model = gp_model.get_fantasy_model(
-                gp_feature_selector(x_input, timestamp=timestamp), y_target
+                x_new, y_target
             )
 
             return fantasy_model
+
+    def _balanced_gate_and_drop(self, X: torch.Tensor, x_new: torch.Tensor):
+        if X.shape[-2] < 2:
+            return True, None
+
+        D_xx = torch.cdist(X, X, p=2)               # (N, N)
+        N = D_xx.size(0)
+        D_xx.fill_diagonal_(float("inf"))
+        d_min_existing, flat_idx = torch.min(D_xx.view(-1), dim=0)
+        i_min = (flat_idx // N).item()
+        j_min = (flat_idx % N).item()
+
+        d_min_new = torch.cdist(x_new, X, p=2).min()
+        accept = bool(d_min_new > d_min_existing)
+        drop_idx = j_min if accept else None
+        return accept, drop_idx
 
 
 class KalmanLearningStrategy(DataProcessingStrategy):
