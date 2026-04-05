@@ -1,3 +1,9 @@
+import importlib
+import os
+import shutil
+import sys
+from glob import glob
+
 import numpy as np
 
 from acados_template import AcadosOcp, AcadosSim, AcadosSimSolver, AcadosOcpSolver
@@ -125,22 +131,91 @@ class ResidualLearningMPC:
         """
         self.use_cython = use_cython
         if use_cython:
-            if build_c_code:
+            self._ensure_cython_command()
+            ocp_code_export_directory = os.path.abspath(self.ocp.code_export_directory)
+            ocp_needs_build = build_c_code or not self._cython_artifacts_available(
+                ocp_code_export_directory,
+                "acados_ocp_solver_pyx",
+            )
+            if ocp_needs_build:
                 AcadosOcpSolver.generate(self.ocp, json_file=path_json_ocp)
                 AcadosOcpSolver.build(self.ocp.code_export_directory, with_cython=True)
+            self._prepare_cython_import(ocp_code_export_directory)
+            self._assert_cython_artifacts_available(
+                ocp_code_export_directory,
+                "acados_ocp_solver_pyx",
+            )
             self.ocp_solver = AcadosOcpSolver.create_cython_solver(path_json_ocp)
 
             if self.has_nominal_model:
-                if build_c_code:
+                sim_code_export_directory = os.path.abspath(self.sim.code_export_directory)
+                sim_needs_build = build_c_code or not self._cython_artifacts_available(
+                    sim_code_export_directory,
+                    "acados_sim_solver_pyx",
+                )
+                if sim_needs_build:
                     AcadosSimSolver.generate(self.sim, json_file=path_json_sim)
                     AcadosSimSolver.build(
                         self.sim.code_export_directory, with_cython=True
                     )
+                self._prepare_cython_import(sim_code_export_directory)
+                self._assert_cython_artifacts_available(
+                    sim_code_export_directory,
+                    "acados_sim_solver_pyx",
+                )
                 self.sim_solver = AcadosSimSolver.create_cython_solver(path_json_sim)
         else:
             self.ocp_solver = AcadosOcpSolver(self.ocp, json_file=path_json_ocp)
             if self.has_nominal_model:
                 self.sim_solver = AcadosSimSolver(self.sim, json_file=path_json_sim)
+
+    @staticmethod
+    def _cython_artifacts_available(code_export_directory: str, module_stem: str) -> bool:
+        artifact_pattern = os.path.join(code_export_directory, f"{module_stem}*.so")
+        return bool(glob(artifact_pattern))
+
+    @staticmethod
+    def _prepare_cython_import(code_export_directory: str) -> None:
+        parent_directory = os.path.dirname(code_export_directory)
+        if parent_directory not in sys.path:
+            sys.path.append(parent_directory)
+        importlib.invalidate_caches()
+
+    @classmethod
+    def _assert_cython_artifacts_available(
+        cls, code_export_directory: str, module_stem: str
+    ) -> None:
+        if cls._cython_artifacts_available(code_export_directory, module_stem):
+            return
+
+        raise FileNotFoundError(
+            f"Missing generated Acados Cython module '{module_stem}' in "
+            f"'{code_export_directory}'."
+        )
+
+    @staticmethod
+    def _ensure_cython_command() -> None:
+        if shutil.which("cython") is not None:
+            return
+
+        cython3_path = shutil.which("cython3")
+        if cython3_path is None:
+            raise FileNotFoundError(
+                "Neither 'cython' nor 'cython3' is available on PATH, but "
+                "Acados needs one of them to build the Cython solver interface."
+            )
+
+        local_bin = os.path.expanduser("~/.local/bin")
+        shim_path = os.path.join(local_bin, "cython")
+        os.makedirs(local_bin, exist_ok=True)
+        with open(shim_path, "w", encoding="utf-8") as shim_file:
+            shim_file.write(f"#!/bin/sh\nexec {cython3_path} \"$@\"\n")
+        os.chmod(shim_path, 0o755)
+
+        current_path = os.environ.get("PATH", "")
+        path_entries = current_path.split(os.pathsep) if current_path else []
+        if local_bin not in path_entries:
+            os.environ["PATH"] = os.pathsep.join([local_bin, current_path]) if current_path else local_bin
 
     def solve(self, acados_sqp_mode=False):
         status_feed = 0
