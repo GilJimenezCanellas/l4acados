@@ -27,8 +27,8 @@ gpytorch = [
     "gpytorch",
 ]
 gpytorch-exo = [
-    "linear_operator @ git+https://github.com/naefjo/linear_operator@feature/exo-gp",
-    "gpytorch @ git+https://github.com/naefjo/gpytorch@feature/exo-gp",
+    "linear-operator @ git+https://github.com/naefjo/linear_operator@fc062601ea9cc82d6abce0190bf0071fd8c54c10",
+    "gpytorch @ git+https://github.com/naefjo/gpytorch@7a30ef164ea01e3cd9a27ab6c4872a2aed73d8f3",
 ]
 test = [
     "pytest",
